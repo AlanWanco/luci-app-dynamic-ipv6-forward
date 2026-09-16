@@ -1,5 +1,7 @@
 # luci-app-dynamic-ipv6-forward
 
+> 面向只有一个域名、没有公网 IPv4 但拥有公网 IPv6，并希望通过 OpenWrt/ImmortalWrt 的 LuCI 将家中多台设备的多个端口转发到公网的用户。
+
 A small, architecture-independent LuCI application for IPv6-only dynamic port forwarding on OpenWrt/fw4.
 
 It stores device and forwarding definitions in `/etc/config/dynipv6forward`. A
