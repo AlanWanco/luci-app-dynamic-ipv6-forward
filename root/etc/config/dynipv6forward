@@ -1,0 +1,4 @@
+config dynipv6forward 'global'
+	option enabled '1'
+	option interval '30'
+	option interface 'br-lan'

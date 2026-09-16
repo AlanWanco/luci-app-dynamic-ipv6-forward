@@ -1,0 +1,18 @@
+# OpenWrt build output
+/bin/
+/build_dir/
+/staging_dir/
+/tmp/
+/files/
+*.ipk
+*.apk
+*.tar
+*.tar.gz
+*.zip
+
+# Editor and OS files
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

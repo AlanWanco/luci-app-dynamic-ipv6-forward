@@ -1,0 +1,14 @@
+{
+	"admin/network/dynipv6forward": {
+		"title": "动态 IPv6 转发",
+		"order": 65,
+		"action": {
+			"type": "view",
+			"path": "dynipv6forward/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-dynipv6forward" ],
+			"uci": { "dynipv6forward": true }
+		}
+	}
+}

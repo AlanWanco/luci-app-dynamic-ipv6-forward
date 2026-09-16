@@ -1,0 +1,78 @@
+name: Build LuCI package
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The package is architecture-independent. Build against both a common
+        # desktop SDK and the ARM64 class used by many R4S installations.
+        arch:
+          - x86_64-24.10.2
+          - aarch64_cortex-a53-24.10.2
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build IPK with the OpenWrt SDK
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: ${{ matrix.arch }}
+          PACKAGES: luci-app-dynamic-ipv6-forward
+          V: s
+
+      - name: Collect package and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/${{ matrix.arch }}"
+          mapfile -t packages < <(find bin -type f -name 'luci-app-dynamic-ipv6-forward_*.ipk' -print)
+          test "${#packages[@]}" -gt 0
+          cp "${packages[@]}" "dist/${{ matrix.arch }}/"
+          (cd "dist/${{ matrix.arch }}" && sha256sum ./*.ipk > SHA256SUMS)
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipk-${{ matrix.arch }}
+          path: dist/${{ matrix.arch }}/
+          if-no-files-found: error
+
+  release:
+    name: Publish release assets
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download built packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ipk-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/**/*.ipk
+            dist/**/SHA256SUMS
+          body: |
+            See the README for installation and configuration instructions.
+            SHA-256 files are included with the workflow artifacts.

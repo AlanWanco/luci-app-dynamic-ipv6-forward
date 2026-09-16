@@ -1,0 +1,510 @@
+#!/bin/sh
+# Dynamic IPv6 forwarding helper for OpenWrt fw4.
+#
+# The service keeps plugin-owned firewall redirect sections in sync with the
+# current global IPv6 address of LAN devices. Devices are normally matched by
+# their MAC address in the IPv6 neighbor table. A configured stable IID can be
+# used as a fallback for hosts whose NDP entry is not currently visible.
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+. /lib/functions.sh
+
+CONFIG='dynipv6forward'
+LOGTAG='dynipv6forward'
+LOCK='/var/run/dynipv6forward.lock'
+RUN_DIR='/var/run/dynipv6forward'
+ACTIVE_FILE="$RUN_DIR/active.$$"
+
+mkdir -p "$RUN_DIR"
+
+log() {
+	logger -t "$LOGTAG" "$*"
+}
+
+valid_id() {
+	case "$1" in
+		''|*[!A-Za-z0-9_-]*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+valid_mac() {
+	printf '%s\n' "$1" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'
+}
+
+valid_ipv6() {
+	case "$1" in
+		[23]*:*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+valid_iid() {
+	printf '%s\n' "$1" | grep -Eq '^[0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4}){3}$'
+}
+
+valid_port_spec() {
+	local spec="$1"
+	local first last
+
+	case "$spec" in
+		''|*[!0-9-]*|*-*-*) return 1 ;;
+	esac
+
+	case "$spec" in
+		*-*)
+			first=${spec%%-*}
+			last=${spec##*-}
+			[ -n "$first" ] && [ -n "$last" ] || return 1
+			;;
+		*)
+			first="$spec"
+			last="$spec"
+			;;
+	esac
+
+	[ "$first" -ge 1 ] 2>/dev/null && [ "$first" -le 65535 ] 2>/dev/null || return 1
+	[ "$last" -ge 1 ] 2>/dev/null && [ "$last" -le 65535 ] 2>/dev/null || return 1
+	[ "$first" -le "$last" ] 2>/dev/null || return 1
+	return 0
+}
+
+# Return the first globally routed /64 on the selected LAN device.
+get_lan_prefix() {
+	ip -6 route show dev "$1" 2>/dev/null | awk '
+		$1 ~ /^[23][0-9A-Fa-f:]*\/64$/ {
+			sub(/\/64$/, "", $1)
+			print $1
+			exit
+		}'
+}
+
+build_ip() {
+	local prefix="$1"
+	local iid="$2"
+
+	case "$prefix" in
+		*::) printf '%s:%s\n' "${prefix%::}" "$iid" ;;
+		*)   printf '%s::%s\n' "$prefix" "$iid" ;;
+	esac
+}
+
+# Find a currently known global address for a MAC. The neighbor table can
+# contain several privacy addresses, so prefer REACHABLE over STALE/DELAY.
+neighbor_for_mac() {
+	local dev="$1"
+	local prefix="$2"
+	local mac="$3"
+
+	ip -6 neigh show dev "$dev" 2>/dev/null | awk \
+		-v prefix="$prefix" -v mac="$mac" '
+		function state_rank(s) {
+			if (s == "REACHABLE") return 0
+			if (s == "STALE") return 1
+			if (s == "DELAY") return 2
+			if (s == "PROBE") return 3
+			if (s == "PERMANENT") return 4
+			return 5
+		}
+		tolower($3) == tolower(mac) &&
+		index(tolower($1), tolower(prefix)) == 1 &&
+		$1 ~ /^[23][0-9A-Fa-f:]*$/ &&
+		$4 != "FAILED" {
+			r = state_rank($4)
+			if (!found || r < best) {
+				found = 1
+				best = r
+				address = $1
+			}
+		}
+		END {
+			if (found) print address
+		}'
+}
+
+# Set RESOLVED_IP and RESOLVE_REASON for a target section.
+resolve_target() {
+	local sid="$1"
+	local enabled dev prefix base static_ip fallback_iid
+
+	RESOLVED_IP=''
+	RESOLVE_REASON=''
+
+	valid_id "$sid" || {
+		RESOLVE_REASON='invalid target id'
+		return 1
+	}
+
+	config_get enabled "$sid" enabled 1
+	[ "$enabled" = '1' ] || {
+		RESOLVE_REASON='disabled'
+		return 1
+	}
+
+	config_get dev "$sid" interface "$GLOBAL_INTERFACE"
+	[ -n "$dev" ] || {
+		RESOLVE_REASON='no LAN device'
+		return 1
+	}
+
+	prefix=$(get_lan_prefix "$dev")
+	[ -n "$prefix" ] || {
+		RESOLVE_REASON="no global /64 on $dev"
+		return 1
+	}
+	base=${prefix%::}
+
+	config_get static_ip "$sid" manual_ip
+	if [ -n "$static_ip" ] && valid_ipv6 "$static_ip"; then
+		if ip -6 route get "$static_ip" dev "$dev" >/dev/null 2>&1; then
+			RESOLVED_IP="$static_ip"
+			RESOLVE_REASON='manual IPv6'
+			return 0
+		fi
+	fi
+
+	TARGET_DEV="$dev"
+	TARGET_PREFIX="$base:"
+	FOUND_IP=''
+	find_neighbor_for_mac() {
+		[ -n "$FOUND_IP" ] && return 0
+		valid_mac "$1" || return 0
+		FOUND_IP=$(neighbor_for_mac "$TARGET_DEV" "$TARGET_PREFIX" "$1")
+	}
+	config_list_foreach "$sid" mac find_neighbor_for_mac
+
+	if [ -n "$FOUND_IP" ]; then
+		RESOLVED_IP="$FOUND_IP"
+		RESOLVE_REASON='NDP/MAC match'
+		return 0
+	fi
+
+	config_get fallback_iid "$sid" fallback_iid
+	if valid_iid "$fallback_iid"; then
+		FOUND_IP=$(build_ip "$prefix" "$fallback_iid")
+		if valid_ipv6 "$FOUND_IP" && ip -6 route get "$FOUND_IP" dev "$dev" >/dev/null 2>&1; then
+			RESOLVED_IP="$FOUND_IP"
+			RESOLVE_REASON='fallback IID'
+			return 0
+		fi
+	fi
+
+	RESOLVE_REASON='no matching NDP address'
+	return 1
+}
+
+find_redirect_by_name() {
+	local wanted="$1"
+
+	uci -q show firewall 2>/dev/null |
+		grep -F "name='$wanted'" |
+		sed -n 's/^firewall\.\(@redirect\[[0-9][0-9]*\]\)\.name=.*/\1/p' |
+		head -n 1
+}
+
+set_fw_option() {
+	local section="$1"
+	local option="$2"
+	local value="$3"
+	local old
+
+	old=$(uci -q get "firewall.${section}.${option}" 2>/dev/null || true)
+	[ "$old" = "$value" ] && return 0
+	uci set "firewall.${section}.${option}=${value}"
+	CHANGED=1
+}
+
+unset_fw_option() {
+	local section="$1"
+	local option="$2"
+
+	if uci -q get "firewall.${section}.${option}" >/dev/null 2>&1; then
+		uci -q delete "firewall.${section}.${option}"
+		CHANGED=1
+	fi
+}
+
+# Add or update one plugin-owned firewall redirect.
+update_redirect() {
+	local sid="$1"
+	local rule_name="$2"
+	local target_ip="$3"
+	local enabled="$4"
+	local proto="$5"
+	local external_port="$6"
+	local internal_port="$7"
+	local source_ip="$8"
+	local section
+
+	section=$(find_redirect_by_name "$rule_name")
+
+	if [ -z "$section" ] && [ "$enabled" = '1' ] && [ -n "$target_ip" ]; then
+		section=$(uci add firewall redirect 2>/dev/null || true)
+		[ -n "$section" ] || {
+			log "cannot create firewall redirect for $sid"
+			return 1
+		}
+	fi
+
+	[ -n "$section" ] || return 0
+
+	set_fw_option "$section" name "$rule_name"
+	set_fw_option "$section" family ipv6
+	set_fw_option "$section" src wan
+	set_fw_option "$section" src_dport "$external_port"
+	set_fw_option "$section" dest lan
+	set_fw_option "$section" dest_port "$internal_port"
+	set_fw_option "$section" proto "$proto"
+	set_fw_option "$section" target DNAT
+
+	if [ -n "$source_ip" ]; then
+		set_fw_option "$section" src_ip "$source_ip"
+	else
+		unset_fw_option "$section" src_ip
+	fi
+
+	if [ -n "$target_ip" ] && [ "$enabled" = '1' ]; then
+		set_fw_option "$section" enabled 1
+		set_fw_option "$section" dest_ip "$target_ip"
+	else
+		# Keep the last address for diagnosis, but never expose a stale target.
+		set_fw_option "$section" enabled 0
+	fi
+}
+
+disable_redirect_by_name() {
+	local rule_name="$1"
+	local section
+
+	section=$(find_redirect_by_name "$rule_name")
+	[ -n "$section" ] || return 0
+	set_fw_option "$section" enabled 0
+}
+
+sync_forward() {
+	local sid="$1"
+	local target enabled proto external_port internal_port source_ip
+	local target_ip=''
+	local invalid_source=0
+	local rule_name
+
+	valid_id "$sid" || return 0
+
+	rule_name="DIPv6F-$sid"
+	printf '%s\n' "$rule_name" >> "$ACTIVE_FILE"
+
+	config_get target "$sid" target
+	config_get enabled "$sid" enabled 1
+	config_get proto "$sid" proto tcp
+	config_get external_port "$sid" external_port
+	config_get internal_port "$sid" internal_port "$external_port"
+	config_get source_ip "$sid" source_ip
+
+	if [ "$proto" != 'tcp' ] && [ "$proto" != 'udp' ]; then
+		log "invalid protocol for $sid ($proto)"
+		disable_redirect_by_name "$rule_name"
+		return 0
+	fi
+
+	if ! valid_port_spec "$external_port" || ! valid_port_spec "$internal_port"; then
+		log "invalid port for $sid (external=$external_port internal=$internal_port)"
+		disable_redirect_by_name "$rule_name"
+		return 0
+	fi
+
+	if [ -n "$source_ip" ]; then
+		case "$source_ip" in
+			*[!0-9A-Fa-f:./]*) invalid_source=1 ;;
+		esac
+		if [ "$invalid_source" -eq 1 ]; then
+			log "invalid source IPv6 restriction for $sid"
+			disable_redirect_by_name "$rule_name"
+			return 0
+		fi
+	fi
+
+	if [ "$GLOBAL_ENABLED" = '1' ] && [ "$enabled" = '1' ] && [ -n "$target" ]; then
+		if resolve_target "$target"; then
+			target_ip="$RESOLVED_IP"
+		else
+			log "target $target for $sid unresolved: $RESOLVE_REASON"
+		fi
+	fi
+
+	if [ -n "$target_ip" ]; then
+		update_redirect "$sid" "$rule_name" "$target_ip" 1 "$proto" \
+			"$external_port" "$internal_port" "$source_ip"
+	else
+		update_redirect "$sid" "$rule_name" '' 0 "$proto" \
+			"$external_port" "$internal_port" "$source_ip"
+	fi
+}
+
+cleanup_removed_forwards() {
+	local list="$RUN_DIR/managed.$$"
+	local section name
+
+	uci -q show firewall 2>/dev/null |
+		sed -n "s/^firewall\.\(@redirect\[[0-9][0-9]*\]\)\.name='\(DIPv6F-[A-Za-z0-9_-]*\)'$/\1|\2/p" > "$list"
+
+	while IFS='|' read -r section name; do
+		[ -n "$section" ] || continue
+		if ! grep -Fqx "$name" "$ACTIVE_FILE" 2>/dev/null; then
+			uci -q delete "firewall.${section}"
+			CHANGED=1
+			log "removed deleted managed forward $name"
+		fi
+	done < "$list"
+
+	rm -f "$list"
+}
+
+apply_firewall() {
+	local backup="$RUN_DIR/firewall.before.$$"
+	local checklog="$RUN_DIR/fw4-check.$$"
+
+	cp /etc/config/firewall "$backup" 2>/dev/null || {
+		log 'cannot back up /etc/config/firewall; refusing to apply changes'
+		uci revert firewall 2>/dev/null || true
+		return 1
+	}
+
+	if ! fw4 check >"$checklog" 2>&1; then
+		log "fw4 check failed; changes were discarded: $(tail -n 3 "$checklog" 2>/dev/null | tr '\n' ' ')"
+		uci revert firewall 2>/dev/null || true
+		rm -f "$backup" "$checklog"
+		return 1
+	fi
+
+	if ! uci commit firewall; then
+		log 'uci commit firewall failed; changes were discarded'
+		uci revert firewall 2>/dev/null || true
+		rm -f "$backup" "$checklog"
+		return 1
+	fi
+
+	if ! fw4 reload >/dev/null 2>&1; then
+		log 'fw4 reload failed; restoring previous firewall configuration'
+		cp "$backup" /etc/config/firewall 2>/dev/null || true
+		uci revert firewall 2>/dev/null || true
+		fw4 reload >/dev/null 2>&1 || true
+		rm -f "$backup" "$checklog"
+		return 1
+	fi
+
+	rm -f "$backup" "$checklog"
+	return 0
+}
+
+sync_once() {
+	local pending
+
+	if ! mkdir "$LOCK" 2>/dev/null; then
+		return 0
+	fi
+	trap 'rmdir "$LOCK" 2>/dev/null || true; rm -f "$ACTIVE_FILE"' EXIT HUP INT TERM
+
+	pending=$(uci changes firewall 2>/dev/null || true)
+	if [ -n "$pending" ]; then
+		log 'firewall has unapplied LuCI changes; sync skipped'
+		rmdir "$LOCK" 2>/dev/null || true
+		trap - EXIT HUP INT TERM
+		return 2
+	fi
+
+	config_load "$CONFIG"
+	config_get GLOBAL_ENABLED global enabled 1
+	config_get GLOBAL_INTERFACE global interface br-lan
+	: > "$ACTIVE_FILE"
+	CHANGED=0
+
+	config_foreach sync_forward forward
+	cleanup_removed_forwards
+
+	if [ "$CHANGED" -eq 1 ]; then
+		apply_firewall || true
+	fi
+
+	rmdir "$LOCK" 2>/dev/null || true
+	trap - EXIT HUP INT TERM
+	return 0
+}
+
+status_target() {
+	local sid="$1"
+	local name dev macs
+
+	valid_id "$sid" || return 0
+	config_get name "$sid" name "$sid"
+	config_get dev "$sid" interface "$GLOBAL_INTERFACE"
+	config_get macs "$sid" mac
+
+	if resolve_target "$sid"; then
+		printf 'TARGET\t%s\t%s\t%s\t%s\n' "$sid" "$name" "$RESOLVED_IP" "$RESOLVE_REASON"
+	else
+		printf 'TARGET\t%s\t%s\t-\t%s\n' "$sid" "$name" "$RESOLVE_REASON"
+	fi
+	printf '  interface=%s mac=%s\n' "$dev" "${macs:--}"
+}
+
+status_forward() {
+	local sid="$1"
+	local name target proto external_port internal_port rule_name section state target_ip='-'
+
+	valid_id "$sid" || return 0
+	config_get name "$sid" name "$sid"
+	config_get target "$sid" target
+	config_get proto "$sid" proto tcp
+	config_get external_port "$sid" external_port
+	config_get internal_port "$sid" internal_port "$external_port"
+	config_get rule_name "$sid" rule_name "DIPv6F-$sid"
+	section=$(find_redirect_by_name "$rule_name")
+	state='missing'
+	[ -n "$section" ] && state=$(uci -q get "firewall.${section}.enabled" 2>/dev/null || echo 1)
+	if [ -n "$target" ] && resolve_target "$target"; then
+		target_ip="$RESOLVED_IP"
+	fi
+	printf 'FORWARD\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$sid" "$name" "${target:--}" "$proto" "$external_port" "$internal_port" "$target_ip" "$state"
+}
+
+show_status() {
+	config_load "$CONFIG"
+	config_get GLOBAL_ENABLED global enabled 1
+	config_get GLOBAL_INTERFACE global interface br-lan
+	printf 'SERVICE\tenabled=%s\tinterval=%s\n' "$GLOBAL_ENABLED" "$(uci -q get "$CONFIG.global.interval" 2>/dev/null || echo 30)"
+	printf 'LAN\tinterface=%s\n' "$GLOBAL_INTERFACE"
+	config_foreach status_target target
+	config_foreach status_forward forward
+}
+
+daemon_loop() {
+	local interval
+
+	while :; do
+		sync_once
+		interval=$(uci -q get "$CONFIG.global.interval" 2>/dev/null || echo 30)
+		case "$interval" in
+			*[!0-9]*|'') interval=30 ;;
+		esac
+		[ "$interval" -ge 10 ] 2>/dev/null || interval=30
+		sleep "$interval"
+	done
+}
+
+case "$1" in
+	sync|apply)
+		sync_once
+		;;
+	status)
+		show_status
+		;;
+	daemon)
+		daemon_loop
+		;;
+	*)
+		echo "Usage: $0 {sync|status|daemon}" >&2
+		exit 2
+		;;
+esac

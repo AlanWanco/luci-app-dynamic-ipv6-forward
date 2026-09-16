@@ -1,0 +1,18 @@
+{
+	"luci-app-dynipv6forward": {
+		"description": "Manage dynamic IPv6 port forwarding",
+		"read": {
+			"uci": [ "dynipv6forward" ],
+			"file": {
+				"/usr/libexec/dynipv6forward": [ "exec" ]
+			}
+		},
+		"write": {
+			"uci": [ "dynipv6forward" ],
+			"file": {
+				"/usr/libexec/dynipv6forward": [ "exec" ],
+				"/etc/init.d/dynipv6forward": [ "exec" ]
+			}
+		}
+	}
+}
