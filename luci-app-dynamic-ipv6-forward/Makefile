@@ -9,6 +9,8 @@ PKG_LICENSE_FILES:=LICENSE
 
 include $(INCLUDE_DIR)/package.mk
 
+# The SDK action builds packages whose default is a module. This does not
+# include the package in firmware images unless the user selects it.
 define Package/luci-app-dynamic-ipv6-forward
   SECTION:=luci
   CATEGORY:=LuCI
@@ -16,8 +18,6 @@ define Package/luci-app-dynamic-ipv6-forward
   TITLE:=Dynamic IPv6 Port Forwarding
   DEPENDS:=+luci-base +firewall4 +ip-full
   PKGARCH:=all
-  # The SDK action builds packages whose default is a module. This does not
-  # include the package in firmware images unless the user selects it.
   DEFAULT:=m
 endef
 
