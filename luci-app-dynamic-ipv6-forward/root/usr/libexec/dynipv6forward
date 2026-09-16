@@ -70,6 +70,79 @@ valid_port_spec() {
 	return 0
 }
 
+# Probe a TCP listener over IPv6 from the router. BusyBox nc on OpenWrt does
+# not accept a -6 option, but it selects IPv6 when given an IPv6 literal.
+probe_tcp_listener() {
+	local ip="$1"
+	local port="$2"
+	local pid elapsed rc
+
+	LISTENER_STATE='unknown'
+	LISTENER_DETAIL='nc-unavailable'
+	command -v nc >/dev/null 2>&1 || return 0
+
+	nc "$ip" "$port" </dev/null >/dev/null 2>&1 &
+	pid=$!
+	elapsed=0
+	while kill -0 "$pid" 2>/dev/null; do
+		if [ "$elapsed" -ge 2 ]; then
+			kill "$pid" 2>/dev/null || true
+			wait "$pid" 2>/dev/null || true
+			LISTENER_STATE='timeout'
+			LISTENER_DETAIL='tcp-connect-timeout'
+			return 0
+		fi
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+
+	wait "$pid" 2>/dev/null
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		LISTENER_STATE='ok'
+		LISTENER_DETAIL='tcp-connect-ok'
+	else
+		LISTENER_STATE='closed'
+		LISTENER_DETAIL='tcp-refused-or-unreachable'
+	fi
+}
+
+# Check whether a configured service accepts connections on its IPv6 address.
+# UDP has no handshake, so a generic UDP probe cannot distinguish an open port
+# from a silently dropped datagram and is deliberately reported as unchecked.
+check_listener() {
+	local ip="$1"
+	local proto="$2"
+	local port="$3"
+	local probe_port
+
+	LISTENER_STATE='unknown'
+	LISTENER_DETAIL='target-ip-unavailable'
+
+	case "$proto" in
+		tcp)
+			valid_port_spec "$port" || {
+				LISTENER_STATE='invalid'
+				LISTENER_DETAIL='invalid-port'
+				return 0
+			}
+			probe_port=${port%%-*}
+			probe_tcp_listener "$ip" "$probe_port"
+			case "$port" in
+				*-*) LISTENER_DETAIL="first-port-only:$LISTENER_DETAIL" ;;
+			esac
+			;;
+		udp)
+			LISTENER_STATE='unsupported'
+			LISTENER_DETAIL='udp-not-probed'
+			;;
+		*)
+			LISTENER_STATE='invalid'
+			LISTENER_DETAIL='invalid-protocol'
+			;;
+	esac
+}
+
 # Return the first globally routed /64 on the selected LAN device.
 get_lan_prefix() {
 	ip -6 route show dev "$1" 2>/dev/null | awk '
@@ -451,6 +524,7 @@ status_target() {
 status_forward() {
 	local sid="$1"
 	local name target proto external_port internal_port rule_name section state target_ip='-'
+	local listener_state='unknown' listener_detail='target-ip-unavailable'
 
 	valid_id "$sid" || return 0
 	config_get name "$sid" name "$sid"
@@ -464,9 +538,13 @@ status_forward() {
 	[ -n "$section" ] && state=$(uci -q get "firewall.${section}.enabled" 2>/dev/null || echo 1)
 	if [ -n "$target" ] && resolve_target "$target"; then
 		target_ip="$RESOLVED_IP"
+		check_listener "$target_ip" "$proto" "$internal_port"
+		listener_state="$LISTENER_STATE"
+		listener_detail="$LISTENER_DETAIL"
 	fi
-	printf 'FORWARD\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-		"$sid" "$name" "${target:--}" "$proto" "$external_port" "$internal_port" "$target_ip" "$state"
+	printf 'FORWARD\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		"$sid" "$name" "${target:--}" "$proto" "$external_port" "$internal_port" "$target_ip" "$state" \
+		"$listener_state" "$listener_detail"
 }
 
 show_status() {

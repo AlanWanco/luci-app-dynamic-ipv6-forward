@@ -56,6 +56,38 @@ function forwardState(value) {
 	return badge('规则不存在', '#dc3545');
 }
 
+function listenerState(value, detail) {
+	var labels = {
+		'ok': [ 'IPv6 TCP 可连接', '#198754' ],
+		'closed': [ 'IPv6 未监听/不可达', '#dc3545' ],
+		'timeout': [ 'IPv6 连接超时', '#fd7e14' ],
+		'unsupported': [ 'UDP 未检查', '#6c757d' ],
+		'invalid': [ '参数无效', '#dc3545' ],
+		'unknown': [ '无法检查', '#6c757d' ]
+	};
+	var detailLabels = {
+		'nc-unavailable': '路由器未安装 nc',
+		'tcp-connect-ok': '',
+		'tcp-refused-or-unreachable': '可能未监听 IPv6，或被设备防火墙拦截',
+		'tcp-connect-timeout': '目标没有及时响应',
+		'udp-not-probed': 'UDP 没有通用握手，需从公网实际测试',
+		'target-ip-unavailable': '没有可用的目标 IPv6',
+		'invalid-port': '内部端口格式无效',
+		'invalid-protocol': '协议格式无效'
+	};
+	var item = labels[value] || labels.unknown;
+	var firstPortOnly = String(detail || '').indexOf('first-port-only:') === 0;
+	if (firstPortOnly)
+		detail = String(detail).slice('first-port-only:'.length);
+	else
+		detail = String(detail || '');
+	if (detailLabels[detail] !== undefined)
+		detail = detailLabels[detail];
+	if (firstPortOnly)
+		detail = '仅检查范围首端口' + (detail ? '；' + detail : '');
+	return badge(item[0], item[1]) + (detail ? '<br><small>' + htmlEscape(detail) + '</small>' : '');
+}
+
 function renderStatus(text) {
 	var service = {};
 	var lan = {};
@@ -94,7 +126,9 @@ function renderStatus(text) {
 				external: fields[5] || '-',
 				internal: fields[6] || '-',
 				ip: fields[7] || '-',
-				state: fields[8] || 'missing'
+				state: fields[8] || 'missing',
+				listener: fields[9] || 'unknown',
+				listenerDetail: fields[10] || ''
 			});
 			break;
 		default:
@@ -141,14 +175,15 @@ function renderStatus(text) {
 	html += '<h4 style="margin:1.2em 0 0.4em">端口转发状态</h4>';
 	if (forwards.length) {
 		html += '<table class="table" style="min-width:980px;margin:0;white-space:nowrap">';
-		html += '<thead><tr><th>规则</th><th>目标设备</th><th>协议</th><th>公网端口</th><th>内部端口</th><th>当前目标 IPv6</th><th>状态</th></tr></thead><tbody>';
+		html += '<thead><tr><th>规则</th><th>目标设备</th><th>协议</th><th>公网端口</th><th>内部端口</th><th>当前目标 IPv6</th><th>IPv6 监听检查</th><th>状态</th></tr></thead><tbody>';
 		forwards.forEach(function(forward) {
 			html += '<tr><td><strong>' + htmlEscape(forward.name) + '</strong><br><small>' +
 				htmlEscape(forward.id) + '</small></td><td>' + htmlEscape(forward.target) +
 				'</td><td>' + htmlEscape(forward.proto) + '</td><td><code>' +
 				htmlEscape(forward.external) + '</code></td><td><code>' +
 				htmlEscape(forward.internal) + '</code></td><td><code>' + htmlEscape(forward.ip) +
-				'</code></td><td>' + forwardState(forward.state) + '</td></tr>';
+				'</code></td><td>' + listenerState(forward.listener, forward.listenerDetail) +
+				'</td><td>' + forwardState(forward.state) + '</td></tr>';
 		});
 		html += '</tbody></table>';
 	} else {
@@ -185,6 +220,7 @@ return view.extend({
 		var initialStatus = statusOutput(data[1]);
 		var m = new form.Map('dynipv6forward', '动态 IPv6 转发',
 			'先配置“设备”，再配置“端口转发规则”。插件会按 MAC/NDP 自动找到设备当前全局 IPv6，随后更新 IPv6 DNAT。\n' +
+			'注意：服务仅绑定 0.0.0.0 代表只监听 IPv4；目标服务还必须监听 IPv6（通常显示为 [::]:端口）。\n' +
 			'公网 DDNS 记录仍应指向路由器 WAN IPv6；本页面不会修改 OpenClash 或 DDNS。');
 		var statusId = 'dynipv6forward-status';
 		var statusOption;
@@ -292,7 +328,7 @@ return view.extend({
 	o.datatype = 'ip6addr';
 
 	var forwards = m.section(form.GridSection, 'forward', '端口转发规则');
-	forwards.description = '每条规则对应一个 TCP 或 UDP 端口。TCP 和 UDP 必须分别建立规则；公网端口可以和设备实际监听的内部端口不同。';
+	forwards.description = '每条规则对应一个 TCP 或 UDP 端口。TCP 和 UDP 必须分别建立规则；公网端口可以和设备实际监听的内部端口不同。状态中的“IPv6 监听检查”会从路由器测试 TCP 连接；UDP 无法通过通用握手可靠判断，需要从公网实际测试。';
 	forwards.addremove = true;
 	forwards.anonymous = true;
 	forwards.sortable = true;
