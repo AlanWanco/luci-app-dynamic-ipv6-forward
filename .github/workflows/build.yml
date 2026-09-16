@@ -27,11 +27,13 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Build IPK with the OpenWrt SDK
+      - name: Build all packages in the local feed
         uses: openwrt/gh-action-sdk@main
         env:
           ARCH: ${{ matrix.arch }}
-          PACKAGES: luci-app-dynamic-ipv6-forward
+          # The SDK action's targeted mode assumes a source download target.
+          # This LuCI package is file-only, so let the action build the local
+          # feed as a whole instead; the feed contains only this package.
           V: s
 
       - name: Collect package and checksum
