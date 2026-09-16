@@ -36,6 +36,7 @@ function reasonText(reason) {
 		'NDP/MAC match': '已通过 MAC/NDP 匹配',
 		'fallback IID': '使用备用 IID',
 		'manual IPv6': '使用手动 IPv6',
+		'router local IPv6': '使用本路由器当前 IPv6',
 		'disabled': '设备已禁用',
 		'no LAN device': '未配置 LAN 接口',
 		'no matching NDP address': '暂未发现匹配地址'
@@ -313,7 +314,7 @@ return view.extend({
 	};
 
 	var targets = m.section(form.GridSection, 'target', '设备');
-	targets.description = '这里填写内网设备。优先使用 MAC 从 IPv6 邻居表发现地址；设备暂时离线或邻居记录尚未出现时，才使用备用 IID。';
+	targets.description = '已预置“本路由器”设备，会自动使用所选 LAN 接口上的当前全局 IPv6。其他内网设备优先使用 MAC 从 IPv6 邻居表发现地址；设备暂时离线或邻居记录尚未出现时，才使用备用 IID。';
 	targets.addremove = true;
 	targets.anonymous = true;
 	targets.sortable = true;

@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-dynamic-ipv6-forward
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=6
+PKG_RELEASE:=7
 PKG_MAINTAINER:=Alan Wanco
 PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE
@@ -53,6 +53,14 @@ endef
 define Package/luci-app-dynamic-ipv6-forward/postinst
 #!/bin/sh
 if [ -z "$${IPKG_INSTROOT}" ]; then
+	if ! uci -q show dynipv6forward.router >/dev/null 2>&1; then
+		uci set dynipv6forward.router=target
+		uci set dynipv6forward.router.name='本路由器'
+		uci set dynipv6forward.router.enabled='1'
+		uci set dynipv6forward.router.interface='br-lan'
+		uci set dynipv6forward.router.self='1'
+		uci commit dynipv6forward
+	fi
 	rm -f /tmp/luci-indexcache.*
 	rm -rf /tmp/luci-modulecache/
 	/etc/init.d/rpcd reload 2>/dev/null || true

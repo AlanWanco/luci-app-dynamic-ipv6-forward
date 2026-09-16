@@ -196,10 +196,36 @@ neighbor_for_mac() {
 		}'
 }
 
+# Return the first preferred global IPv6 assigned to the router's LAN device.
+# Exclude deprecated addresses so a prefix change does not select the old one.
+get_local_global_ip() {
+	local dev="$1"
+	local address
+
+	address=$(ip -6 -o addr show dev "$dev" scope global 2>/dev/null | awk '
+		$0 !~ / deprecated / &&
+		$4 ~ /^[23][0-9A-Fa-f:]*\/[0-9]+$/ {
+			sub(/\/[0-9]+$/, "", $4)
+			print $4
+			exit
+		}')
+	if [ -n "$address" ]; then
+		printf '%s\n' "$address"
+		return 0
+	fi
+
+	ip -6 -o addr show dev "$dev" scope global 2>/dev/null | awk '
+		$4 ~ /^[23][0-9A-Fa-f:]*\/[0-9]+$/ {
+			sub(/\/[0-9]+$/, "", $4)
+			print $4
+			exit
+	}'
+}
+
 # Set RESOLVED_IP and RESOLVE_REASON for a target section.
 resolve_target() {
 	local sid="$1"
-	local enabled dev prefix base static_ip fallback_iid
+	local enabled dev prefix base static_ip fallback_iid self_target local_ip
 
 	RESOLVED_IP=''
 	RESOLVE_REASON=''
@@ -220,6 +246,19 @@ resolve_target() {
 		RESOLVE_REASON='no LAN device'
 		return 1
 	}
+
+	config_get self_target "$sid" self 0
+	if [ "$self_target" = '1' ]; then
+		local_ip=$(get_local_global_ip "$dev")
+		if [ -n "$local_ip" ] && valid_ipv6 "$local_ip" &&
+			ip -6 route get "$local_ip" dev "$dev" >/dev/null 2>&1; then
+			RESOLVED_IP="$local_ip"
+			RESOLVE_REASON='router local IPv6'
+			return 0
+		fi
+		RESOLVE_REASON="no global IPv6 on router $dev"
+		return 1
+	fi
 
 	prefix=$(get_lan_prefix "$dev")
 	[ -n "$prefix" ] || {

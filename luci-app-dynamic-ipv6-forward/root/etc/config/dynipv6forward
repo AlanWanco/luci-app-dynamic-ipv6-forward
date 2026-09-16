@@ -2,3 +2,11 @@ config dynipv6forward 'global'
 	option enabled '1'
 	option interval '30'
 	option interface 'br-lan'
+
+# A built-in target for services listening on the router itself. The helper
+# resolves the current global IPv6 on the configured LAN interface.
+config target 'router'
+	option name '本路由器'
+	option enabled '1'
+	option interface 'br-lan'
+	option self '1'
