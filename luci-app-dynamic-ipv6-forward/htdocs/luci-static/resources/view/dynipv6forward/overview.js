@@ -331,11 +331,15 @@ return view.extend({
 	o.rmempty = false;
 	o.datatype = 'portrange';
 
-	o = forwards.option(form.Value, '内部端口（设备监听）',
+	o = forwards.option(form.Value, 'internal_port', '内部端口（设备监听）',
 		'目标设备实际监听的端口；留空时使用与公网端口相同的端口。');
 	o.modalonly = true;
 	o.rmempty = true;
 	o.datatype = 'portrange';
+	o.cfgvalue = function(section_id) {
+		return uci.get('dynipv6forward', section_id, 'internal_port') ||
+			uci.get('dynipv6forward', section_id, 'external_port') || '';
+	};
 
 	o = forwards.option(form.Value, 'source_ip', '来源 IPv6 限制（可选）',
 		'填写 IPv6 地址或 CIDR 后，仅允许该来源访问；留空表示不限制来源。');
