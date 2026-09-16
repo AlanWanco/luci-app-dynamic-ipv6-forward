@@ -2,6 +2,9 @@
 	"luci-app-dynipv6forward": {
 		"description": "Manage dynamic IPv6 port forwarding",
 		"read": {
+			"ubus": {
+				"luci-rpc": [ "getHostHints" ]
+			},
 			"uci": [ "dynipv6forward" ],
 			"file": {
 				"/usr/libexec/dynipv6forward": [ "exec" ]

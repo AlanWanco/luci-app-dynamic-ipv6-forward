@@ -4,6 +4,7 @@
 'require uci';
 'require fs';
 'require form';
+'require network';
 
 function htmlEscape(value) {
 	return String(value == null ? '' : value)
@@ -208,16 +209,52 @@ function validateInterfaceName(section_id, value) {
 		'请输入有效 Linux 接口名，例如 br-lan 或 eth0.2';
 }
 
+function normalizeMac(value) {
+	return String(value || '').replace(/-/g, ':').toUpperCase();
+}
+
+function valueList(value) {
+	if (Array.isArray(value))
+		return value;
+	return value ? String(value).split(/\s+/) : [];
+}
+
 return view.extend({
 	load: function() {
 		return Promise.all([
 			uci.load('dynipv6forward'),
-			L.resolveDefault(fs.exec('/usr/libexec/dynipv6forward', [ 'status' ]), { stdout: '', stderr: '' })
+			L.resolveDefault(fs.exec('/usr/libexec/dynipv6forward', [ 'status' ]), { stdout: '', stderr: '' }),
+			L.resolveDefault(network.getHostHints(), null)
 		]);
 	},
 
 	render: function(data) {
 		var initialStatus = statusOutput(data[1]);
+		var hostHints = data[2];
+		var macHints = [];
+		var macNames = {};
+
+		if (hostHints && hostHints.getMACHints) {
+			hostHints.getMACHints(true).forEach(function(hint) {
+				var mac = normalizeMac(hint[0]);
+				if (!mac || macNames.hasOwnProperty(mac))
+					return;
+
+				var name = hostHints.getHostnameByMACAddr(hint[0]) || '';
+				var ipv4 = hostHints.getIPAddrByMACAddr(hint[0]) || '';
+				var ipv6 = hostHints.getIP6AddrByMACAddr(hint[0]) || '';
+				var label = name || ipv4 || ipv6 || '';
+
+				macNames[mac] = name;
+				macHints.push({
+					mac: mac,
+					name: name,
+					label: label ? '%s (%s)'.format(mac, label) : mac
+				});
+			});
+		}
+
+		var autoTargetNames = {};
 		var m = new form.Map('dynipv6forward', '动态 IPv6 转发',
 			'先配置“设备”，再配置“端口转发规则”。插件会按 MAC/NDP 自动找到设备当前全局 IPv6，随后更新 IPv6 DNAT。\n' +
 			'注意：服务仅绑定 0.0.0.0 代表只监听 IPv4；目标服务还必须监听 IPv6（通常显示为 [::]:端口）。\n' +
@@ -285,11 +322,11 @@ return view.extend({
 		return targetTitle(section_id);
 	};
 
-	o = targets.option(form.Value, 'name', '名称');
-	o.modalonly = true;
-	o.rmempty = false;
-	o.datatype = 'maxlength(64)';
-	o.placeholder = '例如 Mac / Bot / Windows';
+	var targetNameOpt = targets.option(form.Value, 'name', '名称');
+	targetNameOpt.modalonly = true;
+	targetNameOpt.rmempty = false;
+	targetNameOpt.datatype = 'maxlength(64)';
+	targetNameOpt.placeholder = '例如 Mac / Bot / Windows';
 
 	o = targets.option(form.Flag, 'enabled', '启用');
 	o.default = '1';
@@ -304,11 +341,44 @@ return view.extend({
 	o.validate = validateInterfaceName;
 
 	o = targets.option(form.DynamicList, 'mac', 'MAC 地址',
-		'从 IPv6 邻居表匹配。可添加多个 MAC，例如设备同时使用有线和无线网络。');
+		'可从已发现设备的下拉菜单选择，也可以手动输入。若 MAC 对应 DHCP 或 DNS 主机名，名称会自动填入；不会覆盖已经手动填写的名称。');
 	o.modalonly = true;
 	o.datatype = 'list(macaddr)';
 	o.rmempty = true;
 	o.placeholder = 'aa:bb:cc:dd:ee:ff';
+	macHints.forEach(function(hint) {
+		o.value(hint.mac, hint.label);
+	});
+	o.onchange = function(ev, section_id, value) {
+		var nameEl = targetNameOpt.getUIElement(section_id);
+		var selected = valueList(value);
+		var matchedName = '';
+		var currentName;
+		var previousAutoName = autoTargetNames[section_id] || '';
+
+		if (!nameEl)
+			return;
+
+		currentName = nameEl.getValue ? nameEl.getValue() : '';
+		if (currentName && currentName !== previousAutoName)
+			return;
+
+		for (var i = 0; i < selected.length; i++) {
+			matchedName = macNames[normalizeMac(selected[i])] || '';
+			if (matchedName)
+				break;
+		}
+
+		if (matchedName) {
+			nameEl.setValue(matchedName);
+			autoTargetNames[section_id] = matchedName;
+			if (nameEl.triggerValidation)
+				nameEl.triggerValidation();
+		} else if (previousAutoName && currentName === previousAutoName) {
+			nameEl.setValue('');
+			delete autoTargetNames[section_id];
+		}
+	};
 
 	o = targets.option(form.Value, 'fallback_iid', '备用 IID',
 		'可选的 IPv6 接口标识末段，例如 abcd:1234:5678:9abc。仅在 MAC 邻居暂时不可见时使用。');
