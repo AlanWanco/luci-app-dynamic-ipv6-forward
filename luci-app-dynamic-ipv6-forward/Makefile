@@ -1,20 +1,53 @@
 include $(TOPDIR)/rules.mk
 
-LUCI_TITLE:=Dynamic IPv6 Port Forwarding
-LUCI_DEPENDS:=+luci-base +firewall4 +ip-full
-LUCI_PKGARCH:=all
-# Build the file-only package in SDK/feed CI's default all-package build.
-# It remains a module and is not included in firmware images automatically.
-LUCI_DEFAULT:=m
-
+PKG_NAME:=luci-app-dynamic-ipv6-forward
+PKG_VERSION:=0.1.0
+PKG_RELEASE:=4
 PKG_MAINTAINER:=Alan Wanco
 PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE
-PKG_VERSION:=0.1.0
-PKG_RELEASE:=3
+
+include $(INCLUDE_DIR)/package.mk
+
+define Package/luci-app-dynamic-ipv6-forward
+  SECTION:=luci
+  CATEGORY:=LuCI
+  SUBMENU:=3. Applications
+  TITLE:=Dynamic IPv6 Port Forwarding
+  DEPENDS:=+luci-base +firewall4 +ip-full
+  PKGARCH:=all
+  # The SDK action builds packages whose default is a module. This does not
+  # include the package in firmware images unless the user selects it.
+  DEFAULT:=m
+endef
+
+define Package/luci-app-dynamic-ipv6-forward/description
+A LuCI application for maintaining dynamic IPv6 firewall redirects to LAN devices.
+endef
 
 define Package/luci-app-dynamic-ipv6-forward/conffiles
 /etc/config/dynipv6forward
+endef
+
+define Package/luci-app-dynamic-ipv6-forward/install
+	$(INSTALL_DIR) $(1)/etc/config
+	$(INSTALL_CONF) ./root/etc/config/dynipv6forward $(1)/etc/config/dynipv6forward
+	$(INSTALL_DIR) $(1)/etc/init.d
+	$(INSTALL_BIN) ./root/etc/init.d/dynipv6forward $(1)/etc/init.d/dynipv6forward
+	$(INSTALL_DIR) $(1)/usr/libexec
+	$(INSTALL_BIN) ./root/usr/libexec/dynipv6forward $(1)/usr/libexec/dynipv6forward
+	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d
+	$(INSTALL_DATA) ./root/usr/share/luci/menu.d/luci-app-dynipv6forward.json $(1)/usr/share/luci/menu.d/luci-app-dynipv6forward.json
+	$(INSTALL_DIR) $(1)/usr/share/rpcd/acl.d
+	$(INSTALL_DATA) ./root/usr/share/rpcd/acl.d/luci-app-dynipv6forward.json $(1)/usr/share/rpcd/acl.d/luci-app-dynipv6forward.json
+	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/dynipv6forward
+	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/dynipv6forward/overview.js $(1)/www/luci-static/resources/view/dynipv6forward/overview.js
+endef
+
+define Build/Configure
+endef
+
+define Build/Compile
 endef
 
 define Package/luci-app-dynamic-ipv6-forward/postinst
@@ -59,6 +92,4 @@ fi
 exit 0
 endef
 
-include $(TOPDIR)/feeds/luci/luci.mk
-
-# luci.mk invokes BuildPackage for this LuCI application.
+$(eval $(call BuildPackage,luci-app-dynamic-ipv6-forward))
